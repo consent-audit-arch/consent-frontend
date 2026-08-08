@@ -1,0 +1,20 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Silent Renew</title>
+  </head>
+  <body>
+    <script src="/oidc-client-ts.js"></script>
+    <script>
+      new OidcClient.UserManager({
+        authority: 'http://localhost:8180/realms/tcc',
+        client_id: 'consent-console',
+        response_type: 'code',
+        scope: 'openid profile email',
+      }).signinSilentCallback().catch(function (err) {
+        console.error('[silent-renew]', err);
+      });
+    </script>
+  </body>
+</html>
