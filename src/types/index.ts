@@ -217,6 +217,7 @@ export interface PromotionResponse {
   targetSegment: string;
   status: string;
   createdAt: string;
+  dataSubjectId: number | null;
 }
 
 export interface PromotionWithProfileResponse {

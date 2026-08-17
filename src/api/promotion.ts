@@ -8,6 +8,11 @@ import { promotionClient, newCorrelationId } from './client';
 export const listPromotions = () =>
   promotionClient.get<PromotionResponse[]>('/api/v1/promotions');
 
+export const listPromotionsByUser = (dataSubjectId: number) =>
+  promotionClient.get<PromotionResponse[]>('/api/v1/promotions', {
+    params: { dataSubjectId },
+  });
+
 export const createPromotion = (data: PromotionRequest, purpose = 'PROMOTION') =>
   promotionClient.post<PromotionResponse>('/api/v1/promotions', data, {
     headers: {

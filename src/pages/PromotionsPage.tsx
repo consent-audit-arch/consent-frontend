@@ -1,16 +1,23 @@
-import { useMemo, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
-import { getPromotionWithProfile } from '../api/promotion';
-import { getConsentAuthorizations } from '../api/consent';
+import { useState } from 'react';
+import { useMutation, useQuery } from '@tanstack/react-query';
+import { getPromotionWithProfile, createPromotion } from '../api/promotion';
 import { listUsers } from '../api/user';
+import { getConsentAuthorizations } from '../api/consent';
 import { ProofBanner } from '../components/ProofBanner';
 import { newCorrelationId } from '../api/client';
-import type { PromotionResponse } from '../types';
+import type { PromotionRequest, PromotionResponse } from '../types';
 
 export function PromotionsPage() {
   const [userId, setUserId] = useState<number | ''>('');
-  const [purpose, setPurpose] = useState('PROMOTION');
-  const [correlationId, setCorrelationId] = useState('');
+  const [showCreate, setShowCreate] = useState(false);
+  const [newPromo, setNewPromo] = useState<PromotionRequest>({
+    dataSubjectId: '',
+    name: '',
+    description: '',
+    discountPercent: 10,
+    startDate: '2026-09-01',
+    targetSegment: 'PREMIUM',
+  });
 
   const usersQ = useQuery({
     queryKey: ['users'],
@@ -18,131 +25,234 @@ export function PromotionsPage() {
     retry: false,
   });
 
-  const run = useMemo(() => {
-    if (userId === '') return null;
-    const corr = newCorrelationId();
-    setCorrelationId(corr);
-    return { userId: Number(userId), purpose, corr };
-  }, [userId, purpose]);
-
-  const resultQ = useQuery({
-    queryKey: ['promotion-with-profile', run?.userId, run?.purpose, run?.corr],
-    queryFn: () => getPromotionWithProfile(run!.userId, run!.purpose).then((r) => r.data),
-    enabled: !!run,
-    retry: false,
-  });
-
   const consentQ = useQuery({
-    queryKey: ['consents', userId],
+    queryKey: ['consent', userId],
     queryFn: () => getConsentAuthorizations(Number(userId)).then((r) => r.data),
     enabled: userId !== '',
     retry: false,
   });
 
-  const usageConsent = consentQ.data?.authorizations.filter(
-    (a) => a.purpose === purpose && a.dataCategory === 'USAGE_DATA',
+  const authorizations = consentQ.data?.authorizations ?? [];
+  const hasPersonal = authorizations.some(
+    (a) => a.dataCategory === 'PERSONAL_DATA' && a.purpose === 'PROMOTION' && a.status === 'GRANTED',
   );
-  const personalConsent = consentQ.data?.authorizations.filter(
-    (a) => a.purpose === purpose && a.dataCategory === 'PERSONAL_DATA',
+  const hasUsage = authorizations.some(
+    (a) => a.dataCategory === 'USAGE_DATA' && a.purpose === 'PROMOTION' && a.status === 'GRANTED',
   );
 
-  const result = resultQ.data;
+  const fetchPromoQ = useQuery({
+    queryKey: ['promotion-with-profile', userId],
+    queryFn: async () => {
+      const corr = newCorrelationId();
+      const res = await getPromotionWithProfile(Number(userId), 'PROMOTION');
+      return { data: res.data, correlationId: corr };
+    },
+    enabled: userId !== '' && hasUsage,
+    retry: false,
+  });
+
+  const createPromoMut = useMutation({
+    mutationFn: (data: PromotionRequest) => createPromotion(data, 'PROMOTION'),
+    onSuccess: () => {
+      setShowCreate(false);
+      setNewPromo({ dataSubjectId: '', name: '', description: '', discountPercent: 10, startDate: '2026-09-01', targetSegment: 'PREMIUM' });
+      if (userId !== '' && hasUsage) fetchPromoQ.refetch();
+    },
+  });
+
+  const data = fetchPromoQ.data?.data ?? null;
+  const selectedUser = userId !== '' ? usersQ.data?.find((u) => u.id === Number(userId)) : null;
 
   return (
     <div className="space-y-6">
-      <h2 className="text-lg font-semibold text-gray-900">Promoções com Perfil</h2>
+      <h2 className="text-lg font-semibold text-gray-900">Promoções</h2>
 
       <div className="flex flex-wrap items-end gap-3">
         <div>
-          <label className="block text-xs font-medium text-gray-500">Usuário</label>
+          <label className="block text-xs font-medium text-gray-500">Titular</label>
           <select
             className="mt-1 rounded border border-gray-300 px-3 py-2 text-sm"
             value={userId}
             onChange={(e) => setUserId(e.target.value ? Number(e.target.value) : '')}
           >
-            <option value="">Selecione um usuário</option>
+            <option value="">Selecione um titular</option>
             {usersQ.data?.map((u) => (
-              <option key={u.id} value={u.id}>
-                #{u.id} — {u.fullName}
+              <option key={u.id} value={u.id} disabled={!u.active}>
+                #{u.id} — {u.fullName}{!u.active ? ' (INATIVO)' : ''}
               </option>
             ))}
           </select>
         </div>
-        <div>
-          <label className="block text-xs font-medium text-gray-500">Finalidade</label>
-          <select
-            className="mt-1 rounded border border-gray-300 px-3 py-2 text-sm"
-            value={purpose}
-            onChange={(e) => setPurpose(e.target.value)}
+        {userId !== '' && (
+          <button
+            type="button"
+            onClick={() => setShowCreate((v) => !v)}
+            className="rounded bg-gray-100 px-3 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-200"
           >
-            <option value="PROMOTION">PROMOTION</option>
-            <option value="ANALYTICS">ANALYTICS</option>
-          </select>
-        </div>
+            + Criar Promoção
+          </button>
+        )}
       </div>
 
-      {resultQ.isError && (
-        <ProofBanner
-          isCompliant={false}
-          title="Erro no fluxo de promoções"
-          detail={
-            resultQ.error instanceof Error
-              ? resultQ.error.message
-              : 'Consulte consentimento ativo para USAGE_DATA e PERSONAL_DATA com finalidade PROMOTION.'
-          }
-        />
+      {showCreate && (
+        <div className="space-y-3 rounded-lg border border-gray-200 bg-white p-4">
+          <h3 className="text-sm font-semibold">Nova Promoção para #{userId}</h3>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            <input
+              placeholder="Nome"
+              className="rounded border border-gray-300 px-2 py-1 text-sm"
+              value={newPromo.name}
+              onChange={(e) => setNewPromo({ ...newPromo, name: e.target.value })}
+            />
+            <input
+              placeholder="Descrição"
+              className="rounded border border-gray-300 px-2 py-1 text-sm"
+              value={newPromo.description ?? ''}
+              onChange={(e) => setNewPromo({ ...newPromo, description: e.target.value })}
+            />
+            <input
+              type="number"
+              placeholder="% Desconto"
+              className="rounded border border-gray-300 px-2 py-1 text-sm"
+              value={newPromo.discountPercent}
+              onChange={(e) => setNewPromo({ ...newPromo, discountPercent: Number(e.target.value) })}
+            />
+            <input
+              type="date"
+              className="rounded border border-gray-300 px-2 py-1 text-sm"
+              value={newPromo.startDate}
+              onChange={(e) => setNewPromo({ ...newPromo, startDate: e.target.value })}
+            />
+            <select
+              className="rounded border border-gray-300 px-2 py-1 text-sm"
+              value={newPromo.targetSegment}
+              onChange={(e) => setNewPromo({ ...newPromo, targetSegment: e.target.value })}
+            >
+              <option value="PREMIUM">PREMIUM</option>
+              <option value="STANDARD">STANDARD</option>
+              <option value="BASIC">BASIC</option>
+            </select>
+          </div>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                if (userId !== '') {
+                  createPromoMut.mutate({ ...newPromo, dataSubjectId: String(userId) });
+                }
+              }}
+              disabled={createPromoMut.isPending || !newPromo.name}
+              className="rounded bg-indigo-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+            >
+              {createPromoMut.isPending ? 'Criando...' : 'Criar'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowCreate(false)}
+              className="rounded bg-gray-100 px-4 py-1.5 text-sm font-medium text-gray-600 hover:bg-gray-200"
+            >
+              Cancelar
+            </button>
+          </div>
+          {createPromoMut.isError && (
+            <ProofBanner
+              isCompliant={false}
+              title="Erro ao criar promoção"
+              detail={createPromoMut.error instanceof Error ? createPromoMut.error.message : 'Erro desconhecido.'}
+            />
+          )}
+        </div>
       )}
 
-      {result && (
+      {userId !== '' && consentQ.isLoading && (
+        <p className="text-sm text-gray-400">Verificando consentimento...</p>
+      )}
+
+      {userId !== '' && consentQ.isSuccess && !hasPersonal && !hasUsage && (
+        <div className="rounded-lg border border-gray-200 bg-white p-8 text-center">
+          <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-gray-100">
+            <span className="text-xl text-gray-400">🔒</span>
+          </div>
+          <h3 className="text-sm font-semibold text-gray-700">Sem consentimento para promoções</h3>
+          <p className="mt-1 text-sm text-gray-500">
+            Este titular não possui consentimento ativo para <strong>PERSONAL_DATA</strong> nem <strong>USAGE_DATA</strong> com finalidade <strong>PROMOTION</strong>.
+          </p>
+          <p className="mt-1 text-sm text-gray-500">
+            Conceda o consentimento na aba <strong>Consentimentos</strong> para acessar promoções.
+          </p>
+        </div>
+      )}
+
+      {userId !== '' && consentQ.isSuccess && hasPersonal && !hasUsage && selectedUser && (
+        <>
+          <ProofBanner
+            isCompliant={false}
+            title="Dados de perfil disponíveis — dados de uso NÃO disponíveis"
+            detail="PERSONAL_DATA/PROMOTION concedido. USAGE_DATA/PROMOTION não concedido."
+          />
+          <div className="rounded-lg border border-gray-200 bg-white p-4">
+            <h3 className="mb-2 text-sm font-semibold text-gray-700">Perfil do Titular</h3>
+            <pre className="overflow-x-auto rounded bg-gray-50 p-3 text-xs">
+              {JSON.stringify({
+                id: selectedUser.id,
+                fullName: selectedUser.fullName,
+                email: selectedUser.email,
+                documentNumber: selectedUser.documentNumber,
+                birthDate: selectedUser.birthDate,
+                createdAt: selectedUser.createdAt,
+              }, null, 2)}
+            </pre>
+          </div>
+          <div className="rounded-lg border border-amber-200 bg-amber-50 p-4">
+            <h3 className="mb-1 text-sm font-semibold text-amber-800">Dados de uso indisponíveis</h3>
+            <p className="text-xs text-amber-700">
+              Consentimento <strong>USAGE_DATA/PROMOTION</strong> não concedido. Promoções personalizadas requerem USAGE_DATA.
+            </p>
+          </div>
+        </>
+      )}
+
+      {userId !== '' && consentQ.isSuccess && hasUsage && fetchPromoQ.isLoading && (
+        <p className="text-sm text-gray-400">Carregando dados de uso e promoções...</p>
+      )}
+
+      {data && (
         <>
           <ProofBanner
             isCompliant
-            title="Promoções carregadas com consentimento ativo"
-            detail={`Correlation ID: ${correlationId}`}
+            title="Dados retornados com consentimento ativo"
+            detail={`OPA permitiu acesso. Correlation ID: ${fetchPromoQ.data?.correlationId ?? '—'}`}
           />
 
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
             <div className="rounded-lg border border-gray-200 bg-white p-4">
-              <h3 className="mb-2 text-sm font-semibold text-gray-700">Perfil do Usuário</h3>
+              <h3 className="mb-2 text-sm font-semibold text-gray-700">Perfil do Titular</h3>
               <pre className="overflow-x-auto rounded bg-gray-50 p-3 text-xs">
-                {JSON.stringify(result.userProfile, null, 2)}
+                {JSON.stringify(data.userProfile, null, 2)}
               </pre>
             </div>
             <div className="rounded-lg border border-gray-200 bg-white p-4">
               <h3 className="mb-2 text-sm font-semibold text-gray-700">Dados de Uso</h3>
-              {result.usageData.length === 0 ? (
+              <p className="mb-2 text-xs text-gray-500">
+                Registros de uso que servem de base para promoções personalizadas.
+              </p>
+              {data.usageData.length === 0 ? (
                 <p className="text-sm text-gray-400">Nenhum dado de uso registrado.</p>
               ) : (
                 <pre className="overflow-x-auto rounded bg-gray-50 p-3 text-xs">
-                  {JSON.stringify(result.usageData, null, 2)}
+                  {JSON.stringify(data.usageData, null, 2)}
                 </pre>
               )}
             </div>
           </div>
 
           <div className="rounded-lg border border-gray-200 bg-white p-4">
-            <h3 className="mb-2 text-sm font-semibold text-gray-700">
-              Consentimento exigido pela OPA (finalidade {purpose})
-            </h3>
-            <div className="grid grid-cols-2 gap-3">
-              <ConsentCheck
-                label="USAGE_DATA"
-                ok={usageConsent?.some((a) => a.status === 'GRANTED') ?? false}
-              />
-              <ConsentCheck
-                label="PERSONAL_DATA"
-                ok={personalConsent?.some((a) => a.status === 'GRANTED') ?? false}
-              />
-            </div>
-          </div>
-
-          <div className="rounded-lg border border-gray-200 bg-white p-4">
             <h3 className="mb-3 text-sm font-semibold text-gray-700">Promoções Disponíveis</h3>
-            {result.availablePromotions.length === 0 ? (
-              <p className="text-sm text-gray-400">Nenhuma promoção disponível no momento.</p>
+            {data.availablePromotions.length === 0 ? (
+              <p className="text-sm text-gray-400">Nenhuma promoção cadastrada para este titular.</p>
             ) : (
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                {result.availablePromotions.map((p) => (
+                {data.availablePromotions.map((p) => (
                   <PromotionCard key={p.id} promo={p} />
                 ))}
               </div>
@@ -150,21 +260,6 @@ export function PromotionsPage() {
           </div>
         </>
       )}
-    </div>
-  );
-}
-
-function ConsentCheck({ label, ok }: { label: string; ok: boolean }) {
-  return (
-    <div
-      className={`flex items-center gap-2 rounded border p-3 text-sm ${
-        ok ? 'border-green-200 bg-green-50' : 'border-red-200 bg-red-50'
-      }`}
-    >
-      <span className={`font-semibold ${ok ? 'text-green-800' : 'text-red-800'}`}>{label}</span>
-      <span className={`ml-auto ${ok ? 'text-green-700' : 'text-red-700'}`}>
-        {ok ? 'CONSENTIDO' : 'SEM CONSENTIMENTO'}
-      </span>
     </div>
   );
 }

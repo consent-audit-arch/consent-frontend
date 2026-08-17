@@ -1,12 +1,11 @@
-import { useCallback, useState } from 'react';
+import { useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import {
   grantConsent,
-  deactivateConsent,
   revokeConsent,
   getConsentAuthorizations,
 } from '../api/consent';
-import { createUser, listUsers } from '../api/user';
+import { createUser, listUsers, deactivateUser } from '../api/user';
 import { ProofBanner } from '../components/ProofBanner';
 import type {
   CreateUserCommand,
@@ -14,11 +13,8 @@ import type {
   GrantConsentRequest,
 } from '../types';
 
-const DEFAULT_AUTHORIZATIONS: GrantConsentRequest['authorizations'] = [
-  { dataCategory: 'PERSONAL_DATA', purposes: ['BILLING', 'PROMOTION', 'ANALYTICS'] },
-  { dataCategory: 'CONTRACT_DATA', purposes: ['BILLING'] },
-  { dataCategory: 'USAGE_DATA', purposes: ['PROMOTION', 'ANALYTICS'] },
-];
+const DATA_CATEGORIES = ['PERSONAL_DATA', 'CONTRACT_DATA', 'USAGE_DATA', 'FINANCIAL_DATA'] as const;
+const PURPOSES = ['BILLING', 'PROMOTION', 'ANALYTICS'] as const;
 
 export function ConsentsPage() {
   const [selectedUserId, setSelectedUserId] = useState<number | ''>('');
@@ -29,6 +25,7 @@ export function ConsentsPage() {
     documentNumber: '',
     birthDate: '',
   });
+  const [checked, setChecked] = useState<Record<string, boolean>>({});
 
   const usersQ = useQuery({
     queryKey: ['users'],
@@ -45,24 +42,65 @@ export function ConsentsPage() {
 
   const grantMut = useMutation({
     mutationFn: (data: GrantConsentRequest) => grantConsent(data),
-    onSuccess: () => authorizationsQ.refetch(),
+    onSuccess: () => {
+      authorizationsQ.refetch();
+      setChecked({});
+    },
   });
 
   const deactivateMut = useMutation({
-    mutationFn: (data: { ownerId: number }) =>
-      deactivateConsent({ ownerId: data.ownerId, issuedBy: { issuer: 'USER', id: data.ownerId } }),
+    mutationFn: async (data: { ownerId: number }) => {
+      const granted = (authorizationsQ.data?.authorizations ?? []).filter((a) => a.status === 'GRANTED');
+      for (const auth of granted) {
+        await revokeConsent(data.ownerId, {
+          ownerId: data.ownerId,
+          authorizations: [{ dataCategory: auth.dataCategory, purposes: [auth.purpose] }],
+          reason: 'USER_ACCOUNT_DEACTIVATED',
+          issuedBy: { issuer: 'USER', id: data.ownerId },
+        });
+      }
+    },
     onSuccess: () => authorizationsQ.refetch(),
   });
 
-  const revokeMut = useMutation({
-    mutationFn: (data: { ownerId: number; category: string; purpose: string; reason: string }) =>
-      revokeConsent(data.ownerId, {
-        ownerId: data.ownerId,
-        authorizations: [{ dataCategory: data.category, purposes: [data.purpose] }],
-        reason: data.reason,
-        issuedBy: { issuer: 'USER', id: data.ownerId },
-      }),
-    onSuccess: () => authorizationsQ.refetch(),
+  const revokeSelectedMut = useMutation({
+    mutationFn: async (data: { ownerId: number; authorizations: GrantConsentRequest['authorizations'] }) => {
+      for (const auth of data.authorizations) {
+        for (const purpose of auth.purposes) {
+          await revokeConsent(data.ownerId, {
+            ownerId: data.ownerId,
+            authorizations: [{ dataCategory: auth.dataCategory, purposes: [purpose] }],
+            reason: 'Revogado via console de auditoria',
+            issuedBy: { issuer: 'USER', id: data.ownerId },
+          });
+        }
+      }
+    },
+    onSuccess: () => {
+      authorizationsQ.refetch();
+      setChecked({});
+    },
+  });
+
+  const deactivateUserMut = useMutation({
+    mutationFn: async (userId: number) => {
+      const granted = (authorizationsQ.data?.authorizations ?? []).filter((a) => a.status === 'GRANTED');
+      for (const auth of granted) {
+        await revokeConsent(userId, {
+          ownerId: userId,
+          authorizations: [{ dataCategory: auth.dataCategory, purposes: [auth.purpose] }],
+          reason: 'USER_ACCOUNT_DEACTIVATED',
+          issuedBy: { issuer: 'USER', id: userId },
+        });
+      }
+      await deactivateUser(userId);
+    },
+    onSuccess: () => {
+      usersQ.refetch();
+      authorizationsQ.refetch();
+      setSelectedUserId('');
+      setChecked({});
+    },
   });
 
   const createUserMut = useMutation({
@@ -74,17 +112,54 @@ export function ConsentsPage() {
     },
   });
 
-  const handleGrant = useCallback(() => {
+  const authorizations = authorizationsQ.data?.authorizations ?? [];
+  const selectedUser = usersQ.data?.find((u) => u.id === selectedUserId);
+  const isDeactivated = selectedUser !== undefined && !selectedUser.active;
+
+  const toggle = (cat: string, pur: string) => {
+    const key = `${cat}|${pur}`;
+    setChecked((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
+
+  const handleGrant = () => {
     if (selectedUserId === '') return;
+    const auths = buildAuths();
+    if (auths.length === 0) return;
     grantMut.mutate({
       ownerId: Number(selectedUserId),
-      authorizations: DEFAULT_AUTHORIZATIONS,
+      authorizations: auths,
       legalBasis: 'CONSENT',
       issuedBy: { issuer: 'USER', id: Number(selectedUserId) },
     });
-  }, [selectedUserId, grantMut]);
+  };
 
-  const authorizations = authorizationsQ.data?.authorizations ?? [];
+  const handleRevokeSelected = () => {
+    if (selectedUserId === '') return;
+    const auths = buildAuths();
+    if (auths.length === 0) return;
+    revokeSelectedMut.mutate({
+      ownerId: Number(selectedUserId),
+      authorizations: auths,
+    });
+  };
+
+  const buildAuths = (): GrantConsentRequest['authorizations'] => {
+    const auths: GrantConsentRequest['authorizations'] = [];
+    for (const cat of DATA_CATEGORIES) {
+      const purposes = PURPOSES.filter((p) => checked[`${cat}|${p}`]);
+      if (purposes.length > 0) {
+        auths.push({ dataCategory: cat, purposes });
+      }
+    }
+    return auths;
+  };
+
+  const checkedCount = Object.values(checked).filter(Boolean).length;
+
+  const isDeactivatedError =
+    grantMut.isError &&
+    grantMut.error instanceof Error &&
+    grantMut.error.message.includes('deactivated');
 
   return (
     <div className="space-y-6">
@@ -94,12 +169,15 @@ export function ConsentsPage() {
         <select
           className="rounded border border-gray-300 px-3 py-2 text-sm"
           value={selectedUserId}
-          onChange={(e) => setSelectedUserId(e.target.value ? Number(e.target.value) : '')}
+          onChange={(e) => {
+            setSelectedUserId(e.target.value ? Number(e.target.value) : '');
+            setChecked({});
+          }}
         >
           <option value="">Selecione um usuário</option>
           {usersQ.data?.map((u) => (
-            <option key={u.id} value={u.id}>
-              #{u.id} — {u.fullName}
+            <option key={u.id} value={u.id} disabled={!u.active}>
+              #{u.id} — {u.fullName}{!u.active ? ' (INATIVO)' : ''}
             </option>
           ))}
         </select>
@@ -111,6 +189,21 @@ export function ConsentsPage() {
         >
           + Criar Usuário
         </button>
+
+        {selectedUserId !== '' && (
+          <button
+            type="button"
+            onClick={() => {
+              if (window.confirm('Desativar este titular? Isso revogará todos os consentimentos dele e impedirá novos consentimentos.')) {
+                deactivateUserMut.mutate(Number(selectedUserId));
+              }
+            }}
+            disabled={deactivateUserMut.isPending || isDeactivated}
+            className="rounded bg-red-600 px-3 py-2 text-sm font-medium text-white hover:bg-red-500 disabled:opacity-50"
+          >
+            {deactivateUserMut.isPending ? 'Desativando...' : 'Desativar Titular'}
+          </button>
+        )}
       </div>
 
       {usersQ.isError && (
@@ -119,6 +212,20 @@ export function ConsentsPage() {
           title="Erro ao listar usuários"
           detail={usersQ.error instanceof Error ? usersQ.error.message : 'Consulte user-service.'}
         />
+      )}
+
+      {isDeactivated && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 p-4">
+          <div className="flex items-center gap-3">
+            <span className="text-amber-600">⚠</span>
+            <div>
+              <h3 className="text-sm font-semibold text-amber-800">Titular desativado</h3>
+              <p className="text-xs text-amber-700">
+                Este titular foi desativado. Todos os consentimentos foram revogados e novos consentimentos não podem ser concedidos. Crie um novo titular para continuar.
+              </p>
+            </div>
+          </div>
+        </div>
       )}
 
       {showCreateUser && (
@@ -177,39 +284,122 @@ export function ConsentsPage() {
 
       {selectedUserId !== '' && (
         <>
-          <div className="flex gap-2">
-            <button
-              type="button"
-              onClick={handleGrant}
-              disabled={grantMut.isPending}
-              className="rounded bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-500 disabled:opacity-50"
-            >
-              {grantMut.isPending ? 'Concedendo...' : 'Conceder Consentimentos'}
-            </button>
-            <button
-              type="button"
-              onClick={() => typeof selectedUserId === 'number' && deactivateMut.mutate({ ownerId: selectedUserId })}
-              disabled={deactivateMut.isPending}
-              className="rounded bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-500 disabled:opacity-50"
-            >
-              {deactivateMut.isPending ? 'Revogando...' : 'Desativar Todos'}
-            </button>
+          <div className="rounded-lg border border-gray-200 bg-white p-4">
+            <h3 className="mb-3 text-sm font-semibold text-gray-700">
+              Selecionar Consentimentos
+            </h3>
+            <p className="mb-3 text-xs text-gray-500">
+              Marque as combinações de categoria × finalidade e use os botões para conceder ou revogar.
+            </p>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm">
+                <thead>
+                  <tr className="border-b text-gray-500">
+                    <th className="pb-2 font-medium">Categoria de Dado</th>
+                    {PURPOSES.map((p) => (
+                      <th key={p} className="pb-2 text-center font-medium">{p}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {DATA_CATEGORIES.map((cat) => (
+                    <tr key={cat} className="border-b last:border-0">
+                      <td className="py-2 font-medium">{cat}</td>
+                      {PURPOSES.map((pur) => {
+                        const key = `${cat}|${pur}`;
+                        return (
+                          <td key={pur} className="py-2 text-center">
+                            <input
+                              type="checkbox"
+                              checked={checked[key] ?? false}
+                              onChange={() => toggle(cat, pur)}
+                              className="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                            />
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="mt-3 flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                onClick={handleGrant}
+                disabled={checkedCount === 0 || grantMut.isPending || revokeSelectedMut.isPending || isDeactivated}
+                className="rounded bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-500 disabled:opacity-50"
+              >
+                {grantMut.isPending
+                  ? 'Concedendo...'
+                  : `Conceder Selecionados (${checkedCount})`}
+              </button>
+              <button
+                type="button"
+                onClick={handleRevokeSelected}
+                disabled={checkedCount === 0 || revokeSelectedMut.isPending || grantMut.isPending || isDeactivated}
+                className="rounded bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-500 disabled:opacity-50"
+              >
+                {revokeSelectedMut.isPending
+                  ? 'Revogando...'
+                  : `Revogar Selecionados (${checkedCount})`}
+              </button>
+              <button
+                type="button"
+                onClick={() => typeof selectedUserId === 'number' && deactivateMut.mutate({ ownerId: selectedUserId })}
+                disabled={deactivateMut.isPending || isDeactivated}
+                className="rounded border border-red-300 px-4 py-2 text-sm font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
+              >
+                {deactivateMut.isPending ? 'Desativando...' : 'Desativar Todos (consentimentos)'}
+              </button>
+            </div>
           </div>
 
-          {grantMut.isError && (
+          {grantMut.isSuccess && (
+            <ProofBanner isCompliant title="Consentimentos concedidos com sucesso (202 Accepted)" />
+          )}
+          {isDeactivatedError && (
+            <ProofBanner
+              isCompliant={false}
+              title="Titular desativado"
+              detail="Este titular foi desativado e não pode receber novos consentimentos. Crie um novo titular para continuar."
+            />
+          )}
+          {grantMut.isError && !isDeactivatedError && (
             <ProofBanner
               isCompliant={false}
               title="Falha ao conceder consentimentos"
               detail={grantMut.error instanceof Error ? grantMut.error.message : 'Erro desconhecido.'}
             />
           )}
-          {grantMut.isSuccess && (
-            <ProofBanner isCompliant title="Consentimentos concedidos com sucesso (202 Accepted)" />
+          {revokeSelectedMut.isSuccess && (
+            <ProofBanner isCompliant title="Consentimentos revogados com sucesso" />
           )}
-          {deactivateMut.data && (
+          {revokeSelectedMut.isError && (
+            <ProofBanner
+              isCompliant={false}
+              title="Falha ao revogar consentimentos"
+              detail={revokeSelectedMut.error instanceof Error ? revokeSelectedMut.error.message : 'Erro desconhecido.'}
+            />
+          )}
+          {deactivateMut.isSuccess && (
             <ProofBanner
               isCompliant
-              title={`Consentimentos desativados (${deactivateMut.data.data.consentsRevoked} registros)`}
+              title="Todos os consentimentos foram revogados"
+            />
+          )}
+          {deactivateUserMut.isSuccess && (
+            <ProofBanner
+              isCompliant
+              title="Titular desativado com sucesso"
+              detail="Todos os consentimentos foram revogados. Este titular não pode mais receber consentimentos."
+            />
+          )}
+          {deactivateUserMut.isError && (
+            <ProofBanner
+              isCompliant={false}
+              title="Falha ao desativar titular"
+              detail={deactivateUserMut.error instanceof Error ? deactivateUserMut.error.message : 'Erro desconhecido.'}
             />
           )}
 
@@ -231,13 +421,10 @@ export function ConsentsPage() {
             {authorizations.length > 0 && (
               <AuthorizationTable
                 rows={authorizations}
-                ownerId={Number(selectedUserId)}
                 onRevoke={(category, purpose) =>
-                  revokeMut.mutate({
+                  revokeSelectedMut.mutate({
                     ownerId: Number(selectedUserId),
-                    category,
-                    purpose,
-                    reason: 'Revogado via console de auditoria',
+                    authorizations: [{ dataCategory: category, purposes: [purpose] }],
                   })
                 }
               />
@@ -251,11 +438,9 @@ export function ConsentsPage() {
 
 function AuthorizationTable({
   rows,
-  ownerId,
   onRevoke,
 }: {
   rows: ConsentAuthorizationDetail[];
-  ownerId: number;
   onRevoke: (category: string, purpose: string) => void;
 }) {
   return (
