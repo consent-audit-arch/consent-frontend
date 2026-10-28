@@ -13,8 +13,10 @@ export const createUser = (data: CreateUserCommand) =>
 export const listUsers = () =>
   userClient.get<UserResponse[]>('/api/v1/users');
 
-export const getUser = (id: number) =>
-  userClient.get<UserResponse>(`/api/v1/users/${id}`);
+export const getUser = (id: number, purpose?: string) =>
+  userClient.get<UserResponse>(`/api/v1/users/${id}`, purpose ? {
+    headers: { 'X-Purpose': purpose, 'X-Data-Categories': 'PERSONAL_DATA' },
+  } : undefined);
 
 export const deactivateUser = (id: number) =>
   userClient.post<DeactivateUserResponse>(`/api/v1/users/${id}/deactivate`);
@@ -22,5 +24,7 @@ export const deactivateUser = (id: number) =>
 export const getUserContracts = (id: number) =>
   userClient.get<UserContractProfileDTO[]>(`/api/v1/users/${id}/contract`);
 
-export const getUserUsage = (id: number) =>
-  userClient.get<UserUsageProfileDTO[]>(`/api/v1/users/${id}/usage`);
+export const getUserUsage = (id: number, purpose?: string) =>
+  userClient.get<UserUsageProfileDTO[]>(`/api/v1/users/${id}/usage`, purpose ? {
+    headers: { 'X-Purpose': purpose, 'X-Data-Categories': 'USAGE_DATA' },
+  } : undefined);

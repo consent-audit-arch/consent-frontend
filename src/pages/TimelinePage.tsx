@@ -3,10 +3,10 @@ import { useQuery } from '@tanstack/react-query';
 import { getConsentHistory } from '../api/consent';
 import { getAccessProof, getSubjectTrail } from '../api/audit';
 import { listUsers } from '../api/user';
+import { consentHistoryAt } from '../utils/consentHistory';
 import type {
   AccessProofResponse,
   ConsentHistoryEntry,
-  ConsentProofItem,
   TrailItem,
 } from '../types';
 
@@ -18,13 +18,13 @@ type Entry =
 const toMs = (ts: string) => Date.parse(ts.endsWith('Z') ? ts : `${ts}Z`);
 
 const entryId = (e: Entry): string => {
-  if (e.kind === 'access') return e.trail.traceId;
+  if (e.kind === 'access') return `${e.trail.traceId}-${e.trail.timestamp}-${e.trail.endpoint}-${e.trail.decision}`;
   return `${e.kind}-${e.at}-${e.category}-${e.purpose}`;
 };
 
 export function TimelinePage() {
   const [userId, setUserId] = useState<number | ''>('');
-  const [expanded, setExpanded] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<TrailItem | null>(null);
 
   const usersQ = useQuery({
     queryKey: ['users'],
@@ -49,8 +49,8 @@ export function TimelinePage() {
   });
 
   const proofQ = useQuery({
-    queryKey: ['proof', expanded],
-    queryFn: () => getAccessProof(expanded!).then((r) => r.data),
+    queryKey: ['proof', expanded?.traceId],
+    queryFn: () => getAccessProof(expanded!.traceId).then((r) => r.data),
     enabled: expanded !== null,
     retry: false,
   });
@@ -106,7 +106,12 @@ export function TimelinePage() {
 
       <div className="space-y-3">
         {entries.map((e) => (
-          <TimelineRow key={entryId(e)} entry={e} expanded={expanded} onToggle={() => setExpanded(expanded === entryId(e) ? null : entryId(e))} proof={proofQ.data} proofLoading={proofQ.isLoading} />
+          <TimelineRow
+            key={entryId(e)} entry={e} expanded={expanded}
+            onToggle={() => e.kind === 'access' && setExpanded(expanded === e.trail ? null : e.trail)}
+            proof={proofQ.data} proofLoading={proofQ.isLoading} proofError={proofQ.isError}
+            history={historyQ.data?.events ?? []} historyLoading={historyQ.isLoading} historyError={historyQ.isError}
+          />
         ))}
       </div>
     </div>
@@ -119,12 +124,20 @@ function TimelineRow({
   onToggle,
   proof,
   proofLoading,
+  proofError,
+  history,
+  historyLoading,
+  historyError,
 }: {
   entry: Entry;
-  expanded: string | null;
+  expanded: TrailItem | null;
   onToggle: () => void;
   proof?: AccessProofResponse;
   proofLoading: boolean;
+  proofError: boolean;
+  history: ConsentHistoryEntry[];
+  historyLoading: boolean;
+  historyError: boolean;
 }) {
   if (entry.kind === 'grant') {
     return (
@@ -160,7 +173,7 @@ function TimelineRow({
 
   const t = entry.trail;
   const allowed = t.decision === 'ALLOWED';
-  const isOpen = expanded === t.traceId;
+  const isOpen = expanded === t;
 
   return (
     <div className="flex gap-3">
@@ -186,21 +199,23 @@ function TimelineRow({
               <p className="mt-1 text-xs text-red-600">Motivo: {t.deniedReason}</p>
             )}
           </div>
-          {t.decision === 'ALLOWED' && (
-            <button
+          <button
               type="button"
               onClick={onToggle}
+              aria-expanded={isOpen}
               className="shrink-0 rounded border border-gray-300 px-2 py-1 text-xs font-medium text-gray-600 hover:bg-gray-100"
             >
               {isOpen ? 'Fechar prova' : 'Ver prova'}
-            </button>
-          )}
+          </button>
         </div>
 
         {isOpen && (
           <div className="mt-3 space-y-3 rounded border border-gray-200 bg-gray-50 p-3">
             {proofLoading && <p className="text-xs text-gray-400">Carregando prova de acesso…</p>}
-            {!proofLoading && proof && <ProofView proof={proof} />}
+            {proofError && <p role="alert" className="text-xs text-red-600">Não foi possível carregar a prova. Feche e tente novamente.</p>}
+            {!proofLoading && proof && (
+              <ProofView proof={proof} trail={t} history={history} historyLoading={historyLoading} historyError={historyError} />
+            )}
           </div>
         )}
       </div>
@@ -223,52 +238,57 @@ function Badge({ kind }: { kind: 'grant' | 'revoke' | 'allow' | 'deny' }) {
   );
 }
 
-function ProofView({ proof }: { proof: AccessProofResponse }) {
-  const ok = proof.verdict === 'LEGITIMATE';
+function ProofView({ proof, trail, history, historyLoading, historyError }: {
+  proof: AccessProofResponse;
+  trail: TrailItem;
+  history: ConsentHistoryEntry[];
+  historyLoading: boolean;
+  historyError: boolean;
+}) {
   return (
-    <>
-      <div className="flex items-center justify-between">
-        <p className="text-xs font-semibold text-gray-500">Prova de acesso · trace {proof.traceId.slice(0, 8)}</p>
-        <span
-          className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${
-            ok ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
-          }`}
-        >
-          Verdict: {proof.verdict}
-        </span>
-      </div>
+    <div className="space-y-5">
+      <pre className="overflow-x-auto rounded bg-white p-3 text-xs leading-relaxed text-gray-600">
+        {JSON.stringify(trail, null, 2)}
+      </pre>
 
-      <div>
-        <p className="mb-1 text-xs font-medium text-gray-500">Decisões no fluxo</p>
-        {proof.flow.map((f, i) => (
-          <div key={i} className="mb-1 rounded border border-gray-200 bg-white px-2 py-1.5 text-xs">
-            <span className="font-medium">{f.service}</span> → {f.resource}
-            <span className="text-gray-400"> · {f.endpoint}</span>
-            <span className={`ml-2 font-medium ${f.decision === 'ALLOWED' ? 'text-green-600' : 'text-red-600'}`}>
-              {f.decision}
-            </span>
-            {f.deniedReason && <span className="text-red-500"> ({f.deniedReason})</span>}
+      {historyLoading ? (
+        <p className="text-xs text-gray-400">Carregando consentimentos...</p>
+      ) : historyError ? (
+        <p role="alert" className="text-xs text-red-600">Não foi possível carregar os consentimentos.</p>
+      ) : [...new Set(trail.dataCategories)].map((category) => {
+        const { events, activeIndex } = consentHistoryAt(history, category, trail.purpose, trail.timestamp);
+        return (
+          <div key={category}>
+            <p className="mb-3 font-mono text-xs text-gray-500">{category} / {trail.purpose}</p>
+            <ol className="ml-1 space-y-3 border-l border-gray-200 pl-4">
+              {events.map((event, index) => (
+                <li key={`${event.version}-${event.occurredAt}`} className="relative">
+                  <span aria-hidden="true" className={`absolute -left-[21px] top-4 h-2 w-2 rounded-full ${index === activeIndex ? 'bg-indigo-500' : 'bg-gray-300'}`} />
+                  <div className={`rounded-md border p-3 ${index === activeIndex ? 'border-indigo-300 bg-indigo-50/60' : 'border-transparent bg-white/60'}`}>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-mono text-xs text-gray-700">{event.eventType}</span>
+                      {index === activeIndex && <span className="text-xs font-medium text-indigo-700">Neste acesso</span>}
+                    </div>
+                    <p className="mt-1 font-mono text-xs text-gray-400">{event.occurredAt} · v{event.version}</p>
+                    <details className="mt-2 text-xs text-gray-500">
+                      <summary className="cursor-pointer">JSON</summary>
+                      <pre className="mt-2 overflow-x-auto text-gray-600">{JSON.stringify(event, null, 2)}</pre>
+                    </details>
+                  </div>
+                </li>
+              ))}
+              {activeIndex === -1 && (
+                <li className="text-xs text-gray-400">Sem consentimento registrado antes deste acesso.</li>
+              )}
+            </ol>
           </div>
-        ))}
-      </div>
+        );
+      })}
 
-      <div>
-        <p className="mb-1 text-xs font-medium text-gray-500">Consentimento verificado pelo OPA</p>
-        {proof.consentProof.map((c: ConsentProofItem, i: number) => (
-          <div key={i} className="mb-1 rounded border border-gray-200 bg-white px-2 py-1.5 text-xs">
-            {c.dataCategory} / {c.purpose}
-            <span className={`ml-2 rounded px-1.5 py-0.5 font-medium ${c.legitimate ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
-              {c.statusAtAccessTime}
-            </span>
-            <span className="text-gray-400">
-              {' '}· concedido em {new Date(c.grantedByEvent.timestamp).toLocaleString('pt-BR')}
-            </span>
-            {!c.legitimate && c.violationReason && (
-              <span className="ml-1 text-red-600">· violação: {c.violationReason}</span>
-            )}
-          </div>
-        ))}
-      </div>
-    </>
+      <details className="text-xs text-gray-500">
+        <summary className="cursor-pointer">Registros por serviço</summary>
+        <pre className="mt-2 overflow-x-auto rounded bg-white p-3 text-gray-600">{JSON.stringify(proof.flow, null, 2)}</pre>
+      </details>
+    </div>
   );
 }

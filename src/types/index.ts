@@ -306,7 +306,7 @@ export interface ConsentProofItem {
   dataCategory: string;
   purpose: string;
   statusAtAccessTime: string;
-  grantedByEvent: GrantedByEvent;
+  grantedByEvent: GrantedByEvent | null;
   legitimate: boolean;
   violationReason: ViolationReason | null;
 }

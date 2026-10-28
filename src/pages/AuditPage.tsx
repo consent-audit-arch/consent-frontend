@@ -362,10 +362,10 @@ function ProofView({ proof }: { proof: AccessProofResponse }) {
                   {c.statusAtAccessTime}
                 </span>
               </div>
-              <div className="mt-1 text-xs text-gray-500">
+              {c.grantedByEvent ? <div className="mt-1 text-xs text-gray-500">
                 concedido por evento {c.grantedByEvent.eventId} em{' '}
                 {new Date(c.grantedByEvent.timestamp).toLocaleString('pt-BR')}
-              </div>
+              </div> : <div className="mt-1 text-xs text-gray-500">Sem concessão anterior registrada.</div>}
               {!c.legitimate && (
                 <div className="mt-1 text-xs font-medium text-red-700">
                   Violação: {c.violationReason ?? '—'}

@@ -1,10 +1,9 @@
 import { useState } from 'react';
+import { isAxiosError } from 'axios';
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { getPromotionWithProfile, createPromotion } from '../api/promotion';
-import { listUsers } from '../api/user';
+import { listPromotionsByUser, createPromotion } from '../api/promotion';
+import { getUser, getUserUsage, listUsers } from '../api/user';
 import { getConsentAuthorizations } from '../api/consent';
-import { ProofBanner } from '../components/ProofBanner';
-import { newCorrelationId } from '../api/client';
 import type { PromotionRequest, PromotionResponse } from '../types';
 
 export function PromotionsPage() {
@@ -26,9 +25,12 @@ export function PromotionsPage() {
   });
 
   const consentQ = useQuery({
-    queryKey: ['consent', userId],
+    queryKey: ['consents', userId],
     queryFn: () => getConsentAuthorizations(Number(userId)).then((r) => r.data),
     enabled: userId !== '',
+    staleTime: 0,
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: true,
     retry: false,
   });
 
@@ -40,14 +42,30 @@ export function PromotionsPage() {
     (a) => a.dataCategory === 'USAGE_DATA' && a.purpose === 'PROMOTION' && a.status === 'GRANTED',
   );
 
-  const fetchPromoQ = useQuery({
-    queryKey: ['promotion-with-profile', userId],
-    queryFn: async () => {
-      const corr = newCorrelationId();
-      const res = await getPromotionWithProfile(Number(userId), 'PROMOTION');
-      return { data: res.data, correlationId: corr };
-    },
-    enabled: userId !== '' && hasUsage,
+  const consentReady = userId !== '' && consentQ.isSuccess && !consentQ.isFetching;
+  const consentVersion = JSON.stringify(authorizations);
+
+  const profileQ = useQuery({
+    queryKey: ['promotion-profile', userId, consentVersion],
+    queryFn: () => getUser(Number(userId), 'PROMOTION').then((res) => res.data),
+    enabled: consentReady && hasPersonal,
+    staleTime: 0,
+    retry: false,
+  });
+
+  const usageQ = useQuery({
+    queryKey: ['promotion-usage', userId, consentVersion],
+    queryFn: () => getUserUsage(Number(userId), 'PROMOTION').then((res) => res.data),
+    enabled: consentReady && hasUsage,
+    staleTime: 0,
+    retry: false,
+  });
+
+  const promotionsQ = useQuery({
+    queryKey: ['promotions-by-user', userId],
+    queryFn: () => listPromotionsByUser(Number(userId)).then((res) => res.data),
+    enabled: userId !== '',
+    staleTime: 0,
     retry: false,
   });
 
@@ -56,12 +74,9 @@ export function PromotionsPage() {
     onSuccess: () => {
       setShowCreate(false);
       setNewPromo({ dataSubjectId: '', name: '', description: '', discountPercent: 10, startDate: '2026-09-01', targetSegment: 'PREMIUM' });
-      if (userId !== '' && hasUsage) fetchPromoQ.refetch();
+      if (userId !== '') promotionsQ.refetch();
     },
   });
-
-  const data = fetchPromoQ.data?.data ?? null;
-  const selectedUser = userId !== '' ? usersQ.data?.find((u) => u.id === Number(userId)) : null;
 
   return (
     <div className="space-y-6">
@@ -73,7 +88,11 @@ export function PromotionsPage() {
           <select
             className="mt-1 rounded border border-gray-300 px-3 py-2 text-sm"
             value={userId}
-            onChange={(e) => setUserId(e.target.value ? Number(e.target.value) : '')}
+            onChange={(e) => {
+              setUserId(e.target.value ? Number(e.target.value) : '');
+              setShowCreate(false);
+              createPromoMut.reset();
+            }}
           >
             <option value="">Selecione um titular</option>
             {usersQ.data?.map((u) => (
@@ -86,7 +105,10 @@ export function PromotionsPage() {
         {userId !== '' && (
           <button
             type="button"
-            onClick={() => setShowCreate((v) => !v)}
+            onClick={() => {
+              createPromoMut.reset();
+              setShowCreate((v) => !v);
+            }}
             className="rounded bg-gray-100 px-3 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-200"
           >
             + Criar Promoção
@@ -155,92 +177,60 @@ export function PromotionsPage() {
             </button>
           </div>
           {createPromoMut.isError && (
-            <ProofBanner
-              isCompliant={false}
-              title="Erro ao criar promoção"
-              detail={createPromoMut.error instanceof Error ? createPromoMut.error.message : 'Erro desconhecido.'}
-            />
+            <p role="alert" className="text-sm text-red-700">
+              {isAxiosError(createPromoMut.error) && createPromoMut.error.response?.status === 403
+                ? 'Não foi possível criar a promoção: acesso aos dados de uso não autorizado.'
+                : 'Não foi possível criar a promoção. Verifique os dados e tente novamente.'}
+            </p>
           )}
         </div>
       )}
 
-      {userId !== '' && consentQ.isLoading && (
-        <p className="text-sm text-gray-400">Verificando consentimento...</p>
-      )}
-
-      {userId !== '' && consentQ.isSuccess && !hasPersonal && !hasUsage && (
-        <div className="rounded-lg border border-gray-200 bg-white p-8 text-center">
-          <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-gray-100">
-            <span className="text-xl text-gray-400">🔒</span>
-          </div>
-          <h3 className="text-sm font-semibold text-gray-700">Sem consentimento para promoções</h3>
-          <p className="mt-1 text-sm text-gray-500">
-            Este titular não possui consentimento ativo para <strong>PERSONAL_DATA</strong> nem <strong>USAGE_DATA</strong> com finalidade <strong>PROMOTION</strong>.
-          </p>
-          <p className="mt-1 text-sm text-gray-500">
-            Conceda o consentimento na aba <strong>Consentimentos</strong> para acessar promoções.
-          </p>
-        </div>
-      )}
-
-      {userId !== '' && consentQ.isSuccess && hasPersonal && !hasUsage && selectedUser && (
+      {userId !== '' && (
         <>
-          <ProofBanner
-            isCompliant={false}
-            title="Dados de perfil disponíveis — dados de uso NÃO disponíveis"
-            detail="PERSONAL_DATA/PROMOTION concedido. USAGE_DATA/PROMOTION não concedido."
-          />
-          <div className="rounded-lg border border-gray-200 bg-white p-4">
-            <h3 className="mb-2 text-sm font-semibold text-gray-700">Perfil do Titular</h3>
-            <pre className="overflow-x-auto rounded bg-gray-50 p-3 text-xs">
-              {JSON.stringify({
-                id: selectedUser.id,
-                fullName: selectedUser.fullName,
-                email: selectedUser.email,
-                documentNumber: selectedUser.documentNumber,
-                birthDate: selectedUser.birthDate,
-                createdAt: selectedUser.createdAt,
-              }, null, 2)}
-            </pre>
-          </div>
-          <div className="rounded-lg border border-amber-200 bg-amber-50 p-4">
-            <h3 className="mb-1 text-sm font-semibold text-amber-800">Dados de uso indisponíveis</h3>
-            <p className="text-xs text-amber-700">
-              Consentimento <strong>USAGE_DATA/PROMOTION</strong> não concedido. Promoções personalizadas requerem USAGE_DATA.
-            </p>
-          </div>
-        </>
-      )}
-
-      {userId !== '' && consentQ.isSuccess && hasUsage && fetchPromoQ.isLoading && (
-        <p className="text-sm text-gray-400">Carregando dados de uso e promoções...</p>
-      )}
-
-      {data && (
-        <>
-          <ProofBanner
-            isCompliant
-            title="Dados retornados com consentimento ativo"
-            detail={`OPA permitiu acesso. Correlation ID: ${fetchPromoQ.data?.correlationId ?? '—'}`}
-          />
-
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
             <div className="rounded-lg border border-gray-200 bg-white p-4">
               <h3 className="mb-2 text-sm font-semibold text-gray-700">Perfil do Titular</h3>
-              <pre className="overflow-x-auto rounded bg-gray-50 p-3 text-xs">
-                {JSON.stringify(data.userProfile, null, 2)}
-              </pre>
+              {consentQ.isError ? (
+                <DataError />
+              ) : !consentReady ? (
+                <LoadingData />
+              ) : !hasPersonal || (isAxiosError(profileQ.error) && profileQ.error.response?.status === 403) ? (
+                <LockedData />
+              ) : profileQ.isError ? (
+                <DataError />
+              ) : !profileQ.data ? (
+                <LoadingData />
+              ) : (
+                <pre className="overflow-x-auto rounded bg-gray-50 p-3 text-xs">
+                  {JSON.stringify({
+                    id: profileQ.data.id,
+                    fullName: profileQ.data.fullName,
+                    email: profileQ.data.email,
+                    documentNumber: profileQ.data.documentNumber,
+                    birthDate: profileQ.data.birthDate,
+                    createdAt: profileQ.data.createdAt,
+                  }, null, 2)}
+                </pre>
+              )}
             </div>
             <div className="rounded-lg border border-gray-200 bg-white p-4">
               <h3 className="mb-2 text-sm font-semibold text-gray-700">Dados de Uso</h3>
-              <p className="mb-2 text-xs text-gray-500">
-                Registros de uso que servem de base para promoções personalizadas.
-              </p>
-              {data.usageData.length === 0 ? (
+              {consentQ.isError ? (
+                <DataError />
+              ) : !consentReady ? (
+                <LoadingData />
+              ) : !hasUsage || (isAxiosError(usageQ.error) && usageQ.error.response?.status === 403) ? (
+                <LockedData />
+              ) : usageQ.isError ? (
+                <DataError />
+              ) : !usageQ.data ? (
+                <LoadingData />
+              ) : usageQ.data.length === 0 ? (
                 <p className="text-sm text-gray-400">Nenhum dado de uso registrado.</p>
               ) : (
                 <pre className="overflow-x-auto rounded bg-gray-50 p-3 text-xs">
-                  {JSON.stringify(data.usageData, null, 2)}
+                  {JSON.stringify(usageQ.data, null, 2)}
                 </pre>
               )}
             </div>
@@ -248,11 +238,15 @@ export function PromotionsPage() {
 
           <div className="rounded-lg border border-gray-200 bg-white p-4">
             <h3 className="mb-3 text-sm font-semibold text-gray-700">Promoções Disponíveis</h3>
-            {data.availablePromotions.length === 0 ? (
+            {promotionsQ.isError ? (
+              <DataError />
+            ) : !promotionsQ.data ? (
+              <LoadingData />
+            ) : promotionsQ.data.length === 0 ? (
               <p className="text-sm text-gray-400">Nenhuma promoção cadastrada para este titular.</p>
             ) : (
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                {data.availablePromotions.map((p) => (
+                {promotionsQ.data.map((p) => (
                   <PromotionCard key={p.id} promo={p} />
                 ))}
               </div>
@@ -262,6 +256,23 @@ export function PromotionsPage() {
       )}
     </div>
   );
+}
+
+function LockedData() {
+  return (
+    <div className="flex min-h-32 flex-col items-center justify-center gap-2 rounded bg-gray-50 p-4 text-gray-500">
+      <span aria-hidden="true" className="text-2xl">🔒</span>
+      <p className="text-sm">Acesso não autorizado.</p>
+    </div>
+  );
+}
+
+function LoadingData() {
+  return <p role="status" className="text-sm text-gray-400">Carregando...</p>;
+}
+
+function DataError() {
+  return <p role="alert" className="text-sm text-red-700">Não foi possível carregar os dados.</p>;
 }
 
 function PromotionCard({ promo }: { promo: PromotionResponse }) {
